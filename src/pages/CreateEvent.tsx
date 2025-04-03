@@ -1,7 +1,7 @@
-
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppContext } from '@/context/AppContext';
+import { Database } from '@/types/supabase';
 import AppLayout from '@/components/layout/AppLayout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,449 +9,694 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { Separator } from '@/components/ui/separator';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { EventCategory, VolunteerRole } from '@/types';
 import { toast } from 'sonner';
 import { Trash2, Plus } from 'lucide-react';
+import { supabase } from '@/integrations/supabase/client';
+import { VolunteerRole } from '@/types/supabase';
+import { createEvent } from '@/services/mongodb';
+
+// Add Event type
+type Event = Database['public']['Tables']['events']['Row'];
+
+interface EventFormData {
+  title: string;
+  description: string;
+  image: File | null;
+  date: string;
+  startTime: string;
+  endTime: string;
+  category: string;
+  isFree: boolean;
+  ticketPrice: string;
+  totalSpots: string;
+  address: string;
+  city: string;
+  state: string;
+  zip: string;
+  volunteerRoles: VolunteerRole[];
+}
+
+const categories: EventCategory[] = [
+  'conference',
+  'workshop',
+  'concert',
+  'sports',   //Type '"meetup"' is not assignable to type '"concert" | "conference" | "workshop" | "sports" | "community" | "other"
+  'community',
+  'other'
+];
 
 const CreateEvent: React.FC = () => {
   const navigate = useNavigate();
-  const { user, createEvent, loading } = useAppContext();
-  
-  // If not logged in or not an organizer, redirect to login
-  React.useEffect(() => {
+  const { user } = useAppContext();
+  const [events, setEvents] = useState<Event[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isConnected, setIsConnected] = useState<boolean | null>(null);
+
+  // Form state
+  const [formData, setFormData] = useState<EventFormData>({
+    title: '',
+    description: '',
+    image: null,
+    date: '',
+    startTime: '',
+    endTime: '',
+    category: '',
+    isFree: true,
+    ticketPrice: '',
+    totalSpots: '',
+    address: '',
+    city: '',
+    state: '',
+    zip: '',
+    volunteerRoles: [],
+  });
+
+  const [newRole, setNewRole] = useState('');
+
+  // Handle form field changes
+  const handleInputChange = (field: keyof EventFormData, value: any) => {
+    setFormData(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  // Fetch events from Supabase
+  const fetchEvents = useCallback(async () => {
+    try {
+      console.log('Fetching events for user:', user?.id); // Debug user ID
+
+      const { data, error } = await supabase
+        .from('events')
+        .select('*')
+        .eq('organizer_id', user?.id)
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Fetch error details:', error);
+        toast.error('Failed to fetch events');
+        return;
+      }
+
+      console.log('Fetched events:', data); // Debug fetched data
+      setEvents(data || []);
+    } catch (error) {
+      console.error('Fetch error:', error);
+      toast.error('Failed to fetch events');
+    }
+  }, [user]);
+
+  // Redirect if not organizer
+  useEffect(() => {
     if (!user) {
       navigate('/login');
     } else if (user.role !== 'organizer') {
       toast.error('Only organizers can create events');
       navigate('/');
+    } else {
+      fetchEvents();
     }
-  }, [user, navigate]);
-  
-  // Event details state
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [image, setImage] = useState('');
-  const [date, setDate] = useState('');
-  const [startTime, setStartTime] = useState('');
-  const [endTime, setEndTime] = useState('');
-  const [category, setCategory] = useState<string>('');
-  const [isFree, setIsFree] = useState(true);
-  const [ticketPrice, setTicketPrice] = useState<string>('');
-  const [totalSpots, setTotalSpots] = useState<string>('');
-  
-  // Location state
-  const [address, setAddress] = useState('');
-  const [city, setCity] = useState('');
-  const [state, setState] = useState('');
-  const [zip, setZip] = useState('');
-  
-  // Volunteer roles state
-  const [volunteerRoles, setVolunteerRoles] = useState<VolunteerRole[]>([
-    {
-      id: `role-${Date.now()}`,
-      title: '',
-      description: '',
-      spotsTotal: 1,
-      spotsFilled: 0,
-    },
-  ]);
-  
-  const handleAddRole = () => {
-    setVolunteerRoles([
-      ...volunteerRoles,
-      {
-        id: `role-${Date.now()}`,
-        title: '',
-        description: '',
-        spotsTotal: 1,
-        spotsFilled: 0,
-      },
-    ]);
-  };
-  
-  const handleRemoveRole = (index: number) => {
-    setVolunteerRoles(volunteerRoles.filter((_, i) => i !== index));
-  };
-  
-  const handleRoleChange = (index: number, field: keyof VolunteerRole, value: string | number) => {
-    const updatedRoles = [...volunteerRoles];
-    updatedRoles[index] = {
-      ...updatedRoles[index],
-      [field]: value,
+  }, [user, navigate, fetchEvents]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const channel = supabase
+      .channel('events-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'events',
+          filter: `organizer_id=eq.${user.id}`
+        },
+        (payload) => {
+          console.log('Real-time update:', payload);
+          fetchEvents(); // Refresh events list
+        }
+      )
+      .subscribe();
+
+    // Clean up subscription
+    return () => {
+      channel.unsubscribe();
     };
-    setVolunteerRoles(updatedRoles);
+  }, [user, fetchEvents]);
+
+  // Add this useEffect for connection check
+  useEffect(() => {
+    const checkConnection = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('events')
+          .select('id')
+          .limit(1);
+
+        if (error) {
+          console.error('Supabase connection error:', error);
+          setIsConnected(false);
+          toast.error('Database connection failed');
+        } else {
+          console.log('Supabase connected successfully');
+          setIsConnected(true);
+          toast.success('Connected to database');
+        }
+      } catch (error) {
+        console.error('Connection check failed:', error);
+        setIsConnected(false);
+        toast.error('Database connection failed');
+      }
+    };
+
+    checkConnection();
+  }, []);
+
+  // Add UUID generation function
+  const generateUUID = (): string => {
+  return crypto.randomUUID(); // Use built-in UUID generator
+};
+
+  // Volunteer role handlers
+  const handleAddRole = () => {
+    if (!newRole.trim()) {
+      toast.error('Role name cannot be empty');
+      return;
+    }
+    
+    const role: VolunteerRole = {
+      id: generateUUID(), // Use UUID instead of timestamp
+      name: newRole,
+      description: '',
+      quantity: 1,
+    };
+    
+    handleInputChange('volunteerRoles', [...formData.volunteerRoles, role]);
+    setNewRole('');
   };
-  
+
+  const handleRemoveRole = (id: string) => {
+    handleInputChange('volunteerRoles', formData.volunteerRoles.filter(role => role.id !== id));
+  };
+
+  const handleRoleChange = (id: string, field: keyof VolunteerRole, value: string | number) => {
+    handleInputChange('volunteerRoles', 
+      formData.volunteerRoles.map(role =>
+        role.id === id ? { ...role, [field]: value } : role
+      )
+    );
+  };
+
+  // Validate form data
+  const validateForm = (): boolean => {
+    const { title, description, date, startTime, endTime, category, address, city, state, zip } = formData;
+    
+    if (!title.trim()) {
+      toast.error('Event title is required');
+      return false;
+    }
+    
+    if (!description.trim()) {
+      toast.error('Event description is required');
+      return false;
+    }
+    
+    if (!date) {
+      toast.error('Event date is required');
+      return false;
+    }
+    
+    if (!startTime) {
+      toast.error('Start time is required');
+      return false;
+    }
+    
+    if (!endTime) {
+      toast.error('End time is required');
+      return false;
+    }
+    
+    if (!category) {
+      toast.error('Event category is required');
+      return false;
+    }
+    
+    // Validate date is in the future
+    const eventDate = new Date(`${date}T${startTime}`);
+    if (eventDate < new Date()) {
+      toast.error('Event date must be in the future');
+      return false;
+    }
+    
+    // Validate end time is after start time
+    if (new Date(`${date}T${endTime}`) <= eventDate) {
+      toast.error('End time must be after start time');
+      return false;
+    }
+    
+    // Validate paid event fields
+    if (!formData.isFree) {
+      if (!formData.ticketPrice || parseFloat(formData.ticketPrice) <= 0) {
+        toast.error('Please provide a valid ticket price');
+        return false;
+      }
+      
+      if (!formData.totalSpots || parseInt(formData.totalSpots) <= 0) {
+        toast.error('Please provide a valid number of spots');
+        return false;
+      }
+    }
+    
+    // Add location validation
+    if (!address.trim() || !city.trim() || !state.trim() || !zip.trim()) {
+      toast.error('Please fill in all location fields');
+      return false;
+    }
+    
+    return true;
+  };
+
+  // Upload image to Supabase storage
+  const uploadImage = async (file: File): Promise<string | null> => {
+    if (!file) return null;
+    
+    const fileExt = file.name.split('.').pop();
+    const fileName = `${Date.now()}.${fileExt}`;
+    const filePath = `event-images/${fileName}`;
+
+    const { data, error } = await supabase
+      .storage
+      .from('event-images')
+      .upload(filePath, file);
+
+    if (error) {
+      console.error('Upload error:', error);
+      throw error;
+    }
+
+    // Get public URL
+    const { data: { publicUrl } } = supabase
+      .storage
+      .from('event-images')
+      .getPublicUrl(filePath);
+
+    return publicUrl;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Validate form
-    if (!title || !description || !date || !startTime || !endTime || !category) {
-      toast.error('Please fill in all required fields');
-      return;
-    }
-    
-    if (!address || !city || !state || !zip) {
-      toast.error('Please fill in all location fields');
-      return;
-    }
-    
-    if (!isFree) {
-      if (!ticketPrice || Number(ticketPrice) <= 0) {
-        toast.error('Please enter a valid ticket price');
-        return;
-      }
-      if (!totalSpots || Number(totalSpots) <= 0) {
-        toast.error('Please enter a valid number of total spots');
-        return;
-      }
-    }
-    
-    // Validate volunteer roles
-    for (const role of volunteerRoles) {
-      if (!role.title || !role.description || role.spotsTotal <= 0) {
-        toast.error('Please fill in all volunteer role fields');
-        return;
-      }
-    }
-    
+    setIsSubmitting(true);
+
     try {
-      await createEvent({
-        title,
-        description,
-        image,
-        date,
-        startTime,
-        endTime,
-        category: category as EventCategory,
-        isFree,
-        ticketPrice: isFree ? undefined : Number(ticketPrice),
-        totalSpots: isFree ? undefined : Number(totalSpots),
-        spotsRemaining: isFree ? undefined : Number(totalSpots),
-        location: {
-          address,
-          city,
-          state,
-          zip,
-        },
-        volunteerRoles,
-      });
+      if (!validateForm()) {
+        setIsSubmitting(false);
+        return;
+      }
+
+      let imageUrl = null;
+      if (formData.image) {
+        imageUrl = await uploadImage(formData.image);
+      }
+
+      const eventData = {
+        organizer_id: user?.id,
+        title: formData.title,
+        description: formData.description,
+        image_url: imageUrl,
+        date: formData.date,
+        start_time: formData.startTime,
+        end_time: formData.endTime,
+        category: formData.category,
+        is_free: formData.isFree,
+        ticket_price: formData.isFree ? null : parseFloat(formData.ticketPrice),
+        total_spots: formData.isFree ? null : parseInt(formData.totalSpots),
+        spots_remaining: formData.isFree ? null : parseInt(formData.totalSpots),
+        address: formData.address,
+        city: formData.city,
+        state: formData.state,
+        zip: formData.zip,
+        volunteer_roles: formData.volunteerRoles,
+        created_at: new Date().toISOString()
+      };
+
+      const result = await createEvent(eventData);
       
-      toast.success('Event created successfully');
-      navigate('/events');
-    } catch (error) {
-      // Error is handled in context
+      if (result.error) {
+        throw new Error(result.error);
+      }
+
+      toast.success('Event created successfully!');
+      navigate(`/events/${result.insertedId}`);
+    } catch (error: any) {
+      console.error('Submission error:', error);
+      toast.error(`Failed to create event: ${error.message}`);
+    } finally {
+      setIsSubmitting(false);
     }
   };
-  
+
+  const handleDeleteEvent = async (eventId: string) => {
+    if (!confirm('Are you sure you want to delete this event?')) return;
+
+    try {
+      const { error } = await supabase
+        .from('events')
+        .delete()
+        .eq('id', eventId);
+
+      if (error) throw error;
+
+      toast.success('Event deleted successfully!');
+      fetchEvents();
+    } catch (error) {
+      console.error('Delete error:', error);
+      toast.error('Failed to delete event');
+    }
+  };
+
   return (
     <AppLayout>
+      {isConnected === false && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4" role="alert">
+          <strong className="font-bold">Warning!</strong>
+          <span className="block sm:inline"> Database connection failed. Some features may not work.</span>
+        </div>
+      )}
+      {isConnected === true && (
+        <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4" role="alert">
+          <strong className="font-bold">Connected!</strong>
+          <span className="block sm:inline"> Database connection established successfully.</span>
+        </div>
+      )}
       <div className="container mx-auto px-4 py-8">
         <div className="max-w-4xl mx-auto">
           <h1 className="text-3xl font-bold mb-8">Create New Event</h1>
           
-          <form onSubmit={handleSubmit} className="space-y-8">
-            {/* Event Details */}
+          <form onSubmit={handleSubmit} className="space-y-6">
             <Card>
               <CardHeader>
                 <CardTitle>Event Details</CardTitle>
-                <CardDescription>
-                  Provide basic information about your event
-                </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="title">Event Title <span className="text-red-500">*</span></Label>
+                  <Label htmlFor="title">Event Title *</Label>
                   <Input
                     id="title"
-                    placeholder="e.g., Community Cleanup at City Park"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    required
+                    value={formData.title}
+                    onChange={(e) => handleInputChange('title', e.target.value)}
+                    placeholder="Enter event title"
                   />
                 </div>
-                
+
                 <div className="space-y-2">
-                  <Label htmlFor="description">Description <span className="text-red-500">*</span></Label>
+                  <Label htmlFor="description">Description *</Label>
                   <Textarea
                     id="description"
-                    placeholder="Describe your event..."
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    className="min-h-32"
-                    required
+                    value={formData.description}
+                    onChange={(e) => handleInputChange('description', e.target.value)}
+                    placeholder="Enter event description"
                   />
                 </div>
-                
+
                 <div className="space-y-2">
-                  <Label htmlFor="image">Image URL (optional)</Label>
+                  <Label htmlFor="image">Event Image</Label>
                   <Input
                     id="image"
-                    placeholder="https://example.com/event-image.jpg"
-                    value={image}
-                    onChange={(e) => setImage(e.target.value)}
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => handleInputChange('image', e.target.files?.[0] || null)}
                   />
-                  <p className="text-sm text-gray-500">
-                    Enter a URL for your event banner image
-                  </p>
                 </div>
-                
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="date">Date <span className="text-red-500">*</span></Label>
+                    <Label htmlFor="date">Date *</Label>
                     <Input
                       id="date"
                       type="date"
+                      value={formData.date}
+                      onChange={(e) => handleInputChange('date', e.target.value)}
                       min={new Date().toISOString().split('T')[0]}
-                      value={date}
-                      onChange={(e) => setDate(e.target.value)}
-                      required
                     />
                   </div>
-                  
+
                   <div className="space-y-2">
-                    <Label htmlFor="category">Category <span className="text-red-500">*</span></Label>
-                    <Select value={category} onValueChange={setCategory}>
-                      <SelectTrigger id="category">
-                        <SelectValue placeholder="Select a category" />
+                    <Label htmlFor="category">Category *</Label>
+                    <Select 
+                      value={formData.category} 
+                      onValueChange={(value) => handleInputChange('category', value)}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select category" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="Charity">Charity</SelectItem>
-                        <SelectItem value="Meetup">Meetup</SelectItem>
-                        <SelectItem value="Cultural">Cultural</SelectItem>
-                        <SelectItem value="Sports">Sports</SelectItem>
-                        <SelectItem value="Education">Education</SelectItem>
-                        <SelectItem value="Health">Health</SelectItem>
-                        <SelectItem value="Environmental">Environmental</SelectItem>
-                        <SelectItem value="Technology">Technology</SelectItem>
-                        <SelectItem value="Other">Other</SelectItem>
+                        {categories.map((cat) => (
+                          <SelectItem key={cat} value={cat}>
+                            {cat.charAt(0) + cat.slice(1).toLowerCase()}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
                 </div>
-                
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="startTime">Start Time <span className="text-red-500">*</span></Label>
+                    <Label htmlFor="startTime">Start Time *</Label>
                     <Input
                       id="startTime"
                       type="time"
-                      value={startTime}
-                      onChange={(e) => setStartTime(e.target.value)}
-                      required
+                      value={formData.startTime}
+                      onChange={(e) => handleInputChange('startTime', e.target.value)}
                     />
                   </div>
-                  
+
                   <div className="space-y-2">
-                    <Label htmlFor="endTime">End Time <span className="text-red-500">*</span></Label>
+                    <Label htmlFor="endTime">End Time *</Label>
                     <Input
                       id="endTime"
                       type="time"
-                      value={endTime}
-                      onChange={(e) => setEndTime(e.target.value)}
-                      required
+                      value={formData.endTime}
+                      onChange={(e) => handleInputChange('endTime', e.target.value)}
+                      min={formData.startTime || undefined}
                     />
                   </div>
                 </div>
-                
-                <div className="space-y-3 pt-2">
-                  <Label>Event Type <span className="text-red-500">*</span></Label>
-                  <RadioGroup 
-                    value={isFree ? 'free' : 'paid'} 
-                    onValueChange={(value) => setIsFree(value === 'free')}
-                    className="space-y-1"
+
+                <div className="space-y-2">
+                  <Label>Event Type</Label>
+                  <RadioGroup
+                    value={formData.isFree ? 'free' : 'paid'}
+                    onValueChange={(value) => handleInputChange('isFree', value === 'free')}
+                    className="flex gap-4"
                   >
                     <div className="flex items-center space-x-2">
                       <RadioGroupItem value="free" id="free" />
-                      <Label htmlFor="free">Free Event</Label>
+                      <Label htmlFor="free">Free</Label>
                     </div>
                     <div className="flex items-center space-x-2">
                       <RadioGroupItem value="paid" id="paid" />
-                      <Label htmlFor="paid">Paid Event</Label>
+                      <Label htmlFor="paid">Paid</Label>
                     </div>
                   </RadioGroup>
                 </div>
-                
-                {!isFree && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+
+                {!formData.isFree && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <Label htmlFor="ticketPrice">Ticket Price ($) <span className="text-red-500">*</span></Label>
+                      <Label htmlFor="ticketPrice">Ticket Price ($)</Label>
                       <Input
                         id="ticketPrice"
                         type="number"
-                        placeholder="0.00"
-                        min="0.01"
+                        value={formData.ticketPrice}
+                        onChange={(e) => handleInputChange('ticketPrice', e.target.value)}
+                        min="0"
                         step="0.01"
-                        value={ticketPrice}
-                        onChange={(e) => setTicketPrice(e.target.value)}
+                        placeholder="0.00"
                       />
                     </div>
-                    
+
                     <div className="space-y-2">
-                      <Label htmlFor="totalSpots">Total Available Spots <span className="text-red-500">*</span></Label>
+                      <Label htmlFor="totalSpots">Total Spots</Label>
                       <Input
                         id="totalSpots"
                         type="number"
-                        placeholder="100"
+                        value={formData.totalSpots}
+                        onChange={(e) => handleInputChange('totalSpots', e.target.value)}
                         min="1"
-                        value={totalSpots}
-                        onChange={(e) => setTotalSpots(e.target.value)}
+                        placeholder="100"
                       />
                     </div>
                   </div>
                 )}
               </CardContent>
             </Card>
-            
-            {/* Location */}
+
             <Card>
               <CardHeader>
                 <CardTitle>Location</CardTitle>
-                <CardDescription>
-                  Where will your event take place?
-                </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="address">Street Address <span className="text-red-500">*</span></Label>
+                  <Label htmlFor="address">Address</Label>
                   <Input
                     id="address"
+                    value={formData.address}
+                    onChange={(e) => handleInputChange('address', e.target.value)}
                     placeholder="123 Main St"
-                    value={address}
-                    onChange={(e) => setAddress(e.target.value)}
-                    required
                   />
                 </div>
-                
+
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="city">City <span className="text-red-500">*</span></Label>
+                    <Label htmlFor="city">City</Label>
                     <Input
                       id="city"
-                      placeholder="San Francisco"
-                      value={city}
-                      onChange={(e) => setCity(e.target.value)}
-                      required
+                      value={formData.city}
+                      onChange={(e) => handleInputChange('city', e.target.value)}
+                      placeholder="City"
                     />
                   </div>
-                  
+
                   <div className="space-y-2">
-                    <Label htmlFor="state">State <span className="text-red-500">*</span></Label>
+                    <Label htmlFor="state">State</Label>
                     <Input
                       id="state"
-                      placeholder="CA"
-                      value={state}
-                      onChange={(e) => setState(e.target.value)}
-                      required
+                      value={formData.state}
+                      onChange={(e) => handleInputChange('state', e.target.value)}
+                      placeholder="State"
                     />
                   </div>
-                  
+
                   <div className="space-y-2">
-                    <Label htmlFor="zip">ZIP Code <span className="text-red-500">*</span></Label>
+                    <Label htmlFor="zip">ZIP Code</Label>
                     <Input
                       id="zip"
-                      placeholder="94110"
-                      value={zip}
-                      onChange={(e) => setZip(e.target.value)}
-                      required
+                      value={formData.zip}
+                      onChange={(e) => handleInputChange('zip', e.target.value)}
+                      placeholder="12345"
                     />
                   </div>
                 </div>
               </CardContent>
             </Card>
-            
-            {/* Volunteer Roles */}
+
             <Card>
               <CardHeader>
                 <CardTitle>Volunteer Roles</CardTitle>
-                <CardDescription>
-                  Define roles for volunteers at your event
-                </CardDescription>
+                <CardDescription>Add roles for volunteers at your event</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-6">
-                {volunteerRoles.map((role, index) => (
-                  <div key={role.id} className="space-y-4 pb-4 border-b last:border-0">
-                    <div className="flex justify-between items-center">
-                      <h3 className="font-medium">Role #{index + 1}</h3>
-                      {volunteerRoles.length > 1 && (
+              <CardContent className="space-y-4">
+                <div className="flex gap-2">
+                  <Input
+                    value={newRole}
+                    onChange={(e) => setNewRole(e.target.value)}
+                    placeholder="Role name"
+                  />
+                  <Button type="button" onClick={handleAddRole}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add Role
+                  </Button>
+                </div>
+
+                {formData.volunteerRoles.length > 0 && (
+                  <div className="space-y-4">
+                    {formData.volunteerRoles.map((role) => (
+                      <div key={role.id} className="flex items-center gap-4">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 flex-1">
+                          <Input
+                            value={role.name}
+                            onChange={(e) =>
+                              handleRoleChange(role.id, 'name', e.target.value)
+                            }
+                            placeholder="Role name"
+                          />
+                          <Input
+                            value={role.description}
+                            onChange={(e) =>
+                              handleRoleChange(role.id, 'description', e.target.value)
+                            }
+                            placeholder="Description"
+                          />
+                          <Input
+                            type="number"
+                            value={role.quantity}
+                            onChange={(e) =>
+                              handleRoleChange(role.id, 'quantity', parseInt(e.target.value) || 0)
+                            }
+                            min="1"
+                            placeholder="Quantity"
+                          />
+                        </div>
                         <Button
                           type="button"
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleRemoveRole(index)}
+                          variant="destructive"
+                          size="icon"
+                          onClick={() => handleRemoveRole(role.id)}
                         >
-                          <Trash2 className="h-4 w-4 text-red-500" />
+                          <Trash2 className="h-4 w-4" />
                         </Button>
-                      )}
-                    </div>
-                    
-                    <div className="space-y-4">
-                      <div className="space-y-2">
-                        <Label htmlFor={`role-title-${index}`}>Role Title <span className="text-red-500">*</span></Label>
-                        <Input
-                          id={`role-title-${index}`}
-                          placeholder="e.g., Registration Desk"
-                          value={role.title}
-                          onChange={(e) => handleRoleChange(index, 'title', e.target.value)}
-                          required
-                        />
                       </div>
-                      
-                      <div className="space-y-2">
-                        <Label htmlFor={`role-description-${index}`}>Description <span className="text-red-500">*</span></Label>
-                        <Textarea
-                          id={`role-description-${index}`}
-                          placeholder="What will volunteers do in this role?"
-                          value={role.description}
-                          onChange={(e) => handleRoleChange(index, 'description', e.target.value)}
-                          required
-                        />
-                      </div>
-                      
-                      <div className="space-y-2">
-                        <Label htmlFor={`role-spots-${index}`}>Number of Spots <span className="text-red-500">*</span></Label>
-                        <Input
-                          id={`role-spots-${index}`}
-                          type="number"
-                          min="1"
-                          placeholder="5"
-                          value={role.spotsTotal}
-                          onChange={(e) => handleRoleChange(index, 'spotsTotal', parseInt(e.target.value) || 0)}
-                          required
-                        />
-                      </div>
-                    </div>
+                    ))}
                   </div>
-                ))}
-                
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="w-full"
-                  onClick={handleAddRole}
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  Add Another Role
-                </Button>
+                )}
               </CardContent>
             </Card>
-            
-            {/* Form Actions */}
-            <div className="flex justify-end space-x-4">
-              <Button
-                type="button"
+
+            <div className="flex justify-end gap-4">
+              <Button 
+                type="button" 
                 variant="outline"
                 onClick={() => navigate('/events')}
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={loading}>
-                {loading ? 'Creating Event...' : 'Create Event'}
+              <Button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? 'Creating...' : 'Create Event'}
               </Button>
             </div>
           </form>
+
+          {/* Display created events */}
+          <Card className="mt-8">
+            <CardHeader>
+              <CardTitle>Your Events</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {events.length === 0 ? (
+                <p>No events yet. Create one!</p>
+              ) : (
+                <div className="space-y-4">
+                  {events.map((event) => (
+                    <Card key={event.id}>
+                      <CardHeader>
+                        <CardTitle>{event.title}</CardTitle>
+                        <CardDescription>
+                          {new Date(event.date).toLocaleDateString()} • {event.category}
+                        </CardDescription>
+                      </CardHeader>
+                      <CardFooter className="flex justify-end gap-4">
+                        <Button
+                          variant="outline"
+                          onClick={() => navigate(`/events/${event.id}`)}
+                        >
+                          View
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          onClick={() => handleDeleteEvent(event.id)}
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Delete
+                        </Button>
+                      </CardFooter>
+                    </Card>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
       </div>
     </AppLayout>
@@ -459,3 +704,38 @@ const CreateEvent: React.FC = () => {
 };
 
 export default CreateEvent;
+
+export interface LocalDatabase {
+  public: {
+    Tables: {
+      events: {
+        Row: {
+          id: string;
+          created_at: string;
+          title: string;
+          description: string;
+          date: string;
+          category: EventCategory;
+          organizer_id: string;
+          address: string;
+          city: string;
+          state: string;
+          zip: string;
+          start_time: string;
+          end_time: string;
+          is_free: boolean;
+          ticket_price: number | null;
+          total_spots: number | null;
+          spots_remaining: number | null;
+          volunteer_roles: VolunteerRole[] | null;
+          image_url: string | null;
+        };
+      };
+    };
+  };
+}
+
+// Retain the local declaration of EventCategory
+export type EventCategory = 'conference' | 'workshop' | 'concert' | 'sports' | 'community' | 'other';
+
+// Removed local declaration of VolunteerRole to resolve conflict with imported type

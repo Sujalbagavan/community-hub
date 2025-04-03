@@ -1,7 +1,7 @@
-
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, Event, Comment, VolunteerRole } from '@/types';
 import { toast } from 'sonner';
+import { api } from '@/services/api';
 
 interface AppContextType {
   user: User | null;
@@ -212,19 +212,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const login = async (email: string, password: string) => {
     setLoading(true);
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const foundUser = mockUsers.find(u => u.email === email);
-      if (!foundUser) {
-        throw new Error('Invalid email or password');
-      }
-      
-      setUser(foundUser);
-      localStorage.setItem('community-hub-user', JSON.stringify(foundUser));
+      const { token, user } = await api.auth.login(email, password);
+      setUser(user);
+      localStorage.setItem('token', token);
+      localStorage.setItem('user', JSON.stringify(user));
       toast.success('Logged in successfully');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Login failed');
+      toast.error(error.message);
       throw error;
     } finally {
       setLoading(false);
